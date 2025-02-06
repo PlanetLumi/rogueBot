@@ -83,37 +83,9 @@ def get_trello_client(user_id):
     api_key, token = user_info.get('api_key'), user_info.get('token')
     return TrelloClient(api_key=api_key, token=token) if api_key and token else None
 
-@bot.command(help="Lists board users and their ID's")
-async def list_board_members(ctx):
-    """List all members of the user's Trello board with their usernames and IDs."""
-    user_id = str(ctx.author.id)
-    user_info = user_data.get(user_id, {})
-    board_id = user_info.get('board_id')
-
-    trello_client = get_trello_client(user_id)
-    if not trello_client:
-        await ctx.send("Set your Trello API credentials using `!set_trello`.")
-        return
-
-    try:
-        board = trello_client.get_board(board_id)
-        members = board.get_members()
-    except Exception as e:
-        await ctx.send(f"An error occurred: {e}")
-        return
-
-    if not members:
-        await ctx.send("No members found on this board.")
-        return
-
-    embed = discord.Embed(title=f"Members of Board: {board.name}", color=discord.Color.blue())
-    for member in members:
-        embed.add_field(name=member.username, value=f"Full Name: {member.full_name}\nTrello ID: `{member.id}`", inline=False)
-    await ctx.send(embed=embed)
-
-@bot.command(help="Notify users of new Trello tasks and updates via server channels.")
+@bot.command(help="Notify users of new Trello tasks and updates.")
 async def pingAll(ctx):
-    """Check for new cards and changes on the Trello board and notify assigned users in their preferred channels."""
+    """Check for new cards and changes on the Trello board and notify assigned users."""
     user_id = str(ctx.author.id)
     user_info = user_data.get(user_id, {})
 
@@ -127,11 +99,12 @@ async def pingAll(ctx):
     try:
         board = trello_client.get_board(board_id)
         cards = board.open_cards()
+        print(f"Retrieved {len(cards)} cards from board '{board.name}'")
     except Exception as e:
         await ctx.send(f"Error accessing Trello board: {e}")
         return
 
-    # Load stored card states from a JSON file
+    # Load stored card states
     CARD_STATES_FILE = "card_states.json"
     if os.path.exists(CARD_STATES_FILE):
         with open(CARD_STATES_FILE, "r") as f:
@@ -142,34 +115,37 @@ async def pingAll(ctx):
     new_cards = []
     updated_cards = []
 
-    # Process each card from Trello
     for card in cards:
         card_id = card.id
-
-        # Build a mapping of checklist name to its items for the current state
-        current_checklists = {}
+        print(f"Processing card: {card.name} (ID: {card_id})")
+        
+        # Use the correct attribute name for member IDs:
+        # If your card objects use `member_ids` (plural), update here:
+        assigned_members = getattr(card, "member_ids", []) or getattr(card, "member_id", [])
+        
+        # Build the new checklists state
+        new_checklists = {}
         for checklist in card.checklists:
-            checklist_name = checklist.name
-            current_checklists[checklist_name] = {
+            new_checklists[checklist.name] = {
                 item["name"]: item["state"] for item in checklist.items
             }
 
-        # If we haven't seen this card before, mark it as new
+        # Detect new cards
         if card_id not in known_card_ids:
+            print(f"New card detected: {card.name}")
             new_cards.append(card)
             known_card_ids.add(card_id)
         else:
-            # Compare with previously stored state to detect changes
             previous_state = card_states.get(card_id, {})
             changes = []
 
-            # Check if the description has changed
+            # Check description change
             if previous_state.get("desc") != card.desc:
                 changes.append(f"📜 **Description changed:**\n{card.desc}")
 
-            # Compare checklist changes
             previous_checklists = previous_state.get("checklists", {})
-            for checklist_name, items in current_checklists.items():
+            # Detect checklist changes
+            for checklist_name, items in new_checklists.items():
                 if checklist_name not in previous_checklists:
                     changes.append(f"📋 **New checklist added:** {checklist_name}")
                 else:
@@ -183,71 +159,59 @@ async def pingAll(ctx):
                                 changes.append(f"✅ **Goal completed:** {item_name}")
                             elif state == "incomplete":
                                 changes.append(f"🔄 **Goal marked as in-progress:** {item_name}")
-                    # Check for removed items
+                    # Detect removed items
                     for old_item in old_items.keys():
                         if old_item not in items:
                             changes.append(f"❌ **Goal removed:** {old_item}")
 
             if changes:
+                print(f"Changes detected for card '{card.name}': {changes}")
                 updated_cards.append((card, changes))
 
-        # Update stored state for this card
+        # Save current state of the card
         card_states[card_id] = {
             "desc": card.desc,
-            "checklists": current_checklists
+            "checklists": new_checklists
         }
 
-    # If no new or updated cards were found, let the command issuer know and exit
     if not new_cards and not updated_cards:
         await ctx.send("No new or updated Trello tasks found.")
         return
 
-    # Build a dictionary for updates by user and channel.
-    # Structure: { uid: { channel_name: [message1, message2, ...] } }
-    updates = {}
-
-    # Process new cards notifications
+    # Send notifications through configured channels
     for card in new_cards:
-        # card.member_id is assumed to be a list of Trello member IDs assigned to the card
-        for trello_member_id in card.member_id:
+        for trello_member_id in getattr(card, "member_ids", []) or getattr(card, "member_id", []):
             for uid, info in user_data.items():
                 if info.get('trello_id') == trello_member_id:
-                    # Use a mention string so that the user is pinged in the channel
-                    mention = f"<@{uid}>"
-                    message = f"{mention}, a new card has been assigned to you:\n**{card.name}**\n{card.shortUrl}"
-                    # For each channel configured by the user, add this message
-                    for channel_name in info.get('channels', []):
-                        updates.setdefault(uid, {}).setdefault(channel_name, []).append(message)
+                    discord_user = await bot.fetch_user(uid)
+                    if discord_user:
+                        for channel_name in info.get('channels', []):
+                            channel = discord.utils.get(ctx.guild.text_channels, name=channel_name)
+                            if channel:
+                                await channel.send(
+                                    f"{discord_user.mention}, a new card has been assigned to you: **{card.name}**\n{card.shortUrl}"
+                                )
 
-    # Process updated cards notifications
     for card, changes in updated_cards:
-        for trello_member_id in card.member_id:
+        for trello_member_id in getattr(card, "member_ids", []) or getattr(card, "member_id", []):
             for uid, info in user_data.items():
                 if info.get('trello_id') == trello_member_id:
-                    mention = f"<@{uid}>"
-                    message = (
-                        f"{mention}, updates on your Trello task:\n"
-                        f"**{card.name}**\n{card.shortUrl}\n" +
-                        "\n".join(changes)
-                    )
-                    for channel_name in info.get('channels', []):
-                        updates.setdefault(uid, {}).setdefault(channel_name, []).append(message)
+                    discord_user = await bot.fetch_user(uid)
+                    if discord_user:
+                        for channel_name in info.get('channels', []):
+                            channel = discord.utils.get(ctx.guild.text_channels, name=channel_name)
+                            if channel:
+                                await channel.send(
+                                    f"{discord_user.mention}, updates on your Trello task: **{card.name}**\n{card.shortUrl}\n" +
+                                    "\n".join(changes)
+                                )
 
-    # Send aggregated updates to the designated channels
-    for uid, channel_updates in updates.items():
-        for channel_name, messages in channel_updates.items():
-            channel = discord.utils.get(ctx.guild.text_channels, name=channel_name)
-            if channel:
-                # Join messages with a separator (you can customize formatting as needed)
-                full_message = "\n\n".join(messages)
-                await channel.send(full_message)
-
-    # Save the updated card states and known card IDs for future comparisons
+    # Save updated card states
     with open(CARD_STATES_FILE, "w") as f:
         json.dump(card_states, f)
-    save_known_card_ids()
 
-    await ctx.send("Trello assignments and updates have been notified in the designated channels.")
+    save_known_card_ids()
+    await ctx.send("Trello assignments and updates have been notified.")
 # Slash command with autocomplete
 @bot.tree.command(name="search", description="Search for a command")
 @app_commands.describe(query="Command name")
