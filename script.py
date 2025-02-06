@@ -83,6 +83,34 @@ def get_trello_client(user_id):
     api_key, token = user_info.get('api_key'), user_info.get('token')
     return TrelloClient(api_key=api_key, token=token) if api_key and token else None
 
+@bot.command(help="Lists board users and their ID's")
+async def list_board_members(ctx):
+    """List all members of the user's Trello board with their usernames and IDs."""
+    user_id = str(ctx.author.id)
+    user_info = user_data.get(user_id, {})
+    board_id = user_info.get('board_id')
+
+    trello_client = get_trello_client(user_id)
+    if not trello_client:
+        await ctx.send("Set your Trello API credentials using `!set_trello`.")
+        return
+
+    try:
+        board = trello_client.get_board(board_id)
+        members = board.get_members()
+    except Exception as e:
+        await ctx.send(f"An error occurred: {e}")
+        return
+
+    if not members:
+        await ctx.send("No members found on this board.")
+        return
+
+    embed = discord.Embed(title=f"Members of Board: {board.name}", color=discord.Color.blue())
+    for member in members:
+        embed.add_field(name=member.username, value=f"Full Name: {member.full_name}\nTrello ID: `{member.id}`", inline=False)
+    await ctx.send(embed=embed)
+    
 @bot.command(help="Notify users of new Trello tasks and updates.")
 async def pingAll(ctx):
     """Check for new cards and changes on the Trello board and notify assigned users."""
