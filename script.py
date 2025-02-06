@@ -111,9 +111,9 @@ async def list_board_members(ctx):
         embed.add_field(name=member.username, value=f"Full Name: {member.full_name}\nTrello ID: `{member.id}`", inline=False)
     await ctx.send(embed=embed)
 
-@bot.command(help="Notify users of new Trello tasks and updates.")
+@bot.command(help="Notify users of new Trello tasks and updates via server channels.")
 async def pingAll(ctx):
-    """Check for new cards and changes on the Trello board and notify assigned users."""
+    """Check for new cards and changes on the Trello board and notify assigned users in their preferred channels."""
     user_id = str(ctx.author.id)
     user_info = user_data.get(user_id, {})
 
@@ -131,7 +131,7 @@ async def pingAll(ctx):
         await ctx.send(f"Error accessing Trello board: {e}")
         return
 
-    # Load stored card states
+    # Load stored card states from a JSON file
     CARD_STATES_FILE = "card_states.json"
     if os.path.exists(CARD_STATES_FILE):
         with open(CARD_STATES_FILE, "r") as f:
@@ -142,59 +142,48 @@ async def pingAll(ctx):
     new_cards = []
     updated_cards = []
 
+    # Process each card from Trello
     for card in cards:
         card_id = card.id
-        assigned_members = card.member_id
 
-        # Ensure checklists exist to avoid UnboundLocalError
-        new_checklists = {}
+        # Build a mapping of checklist name to its items for the current state
+        current_checklists = {}
+        for checklist in card.checklists:
+            checklist_name = checklist.name
+            current_checklists[checklist_name] = {
+                item["name"]: item["state"] for item in checklist.items
+            }
 
-        # Identify new cards
+        # If we haven't seen this card before, mark it as new
         if card_id not in known_card_ids:
             new_cards.append(card)
             known_card_ids.add(card_id)
-
-        # Identify card changes, including checklist updates
         else:
+            # Compare with previously stored state to detect changes
             previous_state = card_states.get(card_id, {})
             changes = []
 
-            # Check for description changes
+            # Check if the description has changed
             if previous_state.get("desc") != card.desc:
                 changes.append(f"📜 **Description changed:**\n{card.desc}")
 
-            # Track checklist changes
-            for checklist in card.checklists:
-                checklist_name = checklist.name
-                new_checklists[checklist_name] = {
-                    item["name"]: item["state"] for item in checklist.items
-                }
-
+            # Compare checklist changes
             previous_checklists = previous_state.get("checklists", {})
-
-            # Detect new, completed, and removed checklist items
-            for checklist_name, items in new_checklists.items():
+            for checklist_name, items in current_checklists.items():
                 if checklist_name not in previous_checklists:
                     changes.append(f"📋 **New checklist added:** {checklist_name}")
                 else:
                     old_items = previous_checklists.get(checklist_name, {})
-
                     for item_name, state in items.items():
                         prev_state = old_items.get(item_name)
-
-                        # New checklist item detected
                         if prev_state is None:
                             changes.append(f"🆕 **New goal added:** {item_name}")
-
-                        # Completed checklist item
-                        elif prev_state != state and state == "complete":
-                            changes.append(f"✅ **Goal completed:** {item_name}")
-
-                        # Ongoing/In-progress goal
-                        elif prev_state != state and state == "incomplete":
-                            changes.append(f"🔄 **Goal marked as in-progress:** {item_name}")
-
-                    # Detect removed checklist items
+                        elif prev_state != state:
+                            if state == "complete":
+                                changes.append(f"✅ **Goal completed:** {item_name}")
+                            elif state == "incomplete":
+                                changes.append(f"🔄 **Goal marked as in-progress:** {item_name}")
+                    # Check for removed items
                     for old_item in old_items.keys():
                         if old_item not in items:
                             changes.append(f"❌ **Goal removed:** {old_item}")
@@ -202,50 +191,63 @@ async def pingAll(ctx):
             if changes:
                 updated_cards.append((card, changes))
 
-        # Save current state
+        # Update stored state for this card
         card_states[card_id] = {
             "desc": card.desc,
-            "checklists": new_checklists  # Now always exists
+            "checklists": current_checklists
         }
 
-    # Notify users about new and updated cards
+    # If no new or updated cards were found, let the command issuer know and exit
     if not new_cards and not updated_cards:
         await ctx.send("No new or updated Trello tasks found.")
         return
 
+    # Build a dictionary for updates by user and channel.
+    # Structure: { uid: { channel_name: [message1, message2, ...] } }
+    updates = {}
+
+    # Process new cards notifications
     for card in new_cards:
+        # card.member_id is assumed to be a list of Trello member IDs assigned to the card
         for trello_member_id in card.member_id:
             for uid, info in user_data.items():
                 if info.get('trello_id') == trello_member_id:
-                    discord_user = await bot.fetch_user(uid)
-                    if discord_user:
-                        for channel_name in info.get('channels', []):
-                            channel = discord.utils.get(ctx.guild.text_channels, name=channel_name)
-                            if channel:
-                                await channel.send(
-                                    f"{discord_user.mention}, a new card has been assigned to you: **{card.name}**\n{card.shortUrl}"
-                                )
+                    # Use a mention string so that the user is pinged in the channel
+                    mention = f"<@{uid}>"
+                    message = f"{mention}, a new card has been assigned to you:\n**{card.name}**\n{card.shortUrl}"
+                    # For each channel configured by the user, add this message
+                    for channel_name in info.get('channels', []):
+                        updates.setdefault(uid, {}).setdefault(channel_name, []).append(message)
 
+    # Process updated cards notifications
     for card, changes in updated_cards:
         for trello_member_id in card.member_id:
             for uid, info in user_data.items():
                 if info.get('trello_id') == trello_member_id:
-                    discord_user = await bot.fetch_user(uid)
-                    if discord_user:
-                        for channel_name in info.get('channels', []):
-                            channel = discord.utils.get(ctx.guild.text_channels, name=channel_name)
-                            if channel:
-                                await channel.send(
-                                    f"{discord_user.mention}, updates on your Trello task: **{card.name}**\n{card.shortUrl}\n"
-                                    + "\n".join(changes)
-                                )
+                    mention = f"<@{uid}>"
+                    message = (
+                        f"{mention}, updates on your Trello task:\n"
+                        f"**{card.name}**\n{card.shortUrl}\n" +
+                        "\n".join(changes)
+                    )
+                    for channel_name in info.get('channels', []):
+                        updates.setdefault(uid, {}).setdefault(channel_name, []).append(message)
 
-    # Save updated states
+    # Send aggregated updates to the designated channels
+    for uid, channel_updates in updates.items():
+        for channel_name, messages in channel_updates.items():
+            channel = discord.utils.get(ctx.guild.text_channels, name=channel_name)
+            if channel:
+                # Join messages with a separator (you can customize formatting as needed)
+                full_message = "\n\n".join(messages)
+                await channel.send(full_message)
+
+    # Save the updated card states and known card IDs for future comparisons
     with open(CARD_STATES_FILE, "w") as f:
         json.dump(card_states, f)
-
     save_known_card_ids()
-    await ctx.send("Trello assignments and updates have been notified.")
+
+    await ctx.send("Trello assignments and updates have been notified in the designated channels.")
 # Slash command with autocomplete
 @bot.tree.command(name="search", description="Search for a command")
 @app_commands.describe(query="Command name")
