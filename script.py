@@ -25,6 +25,48 @@ def save_server_data():
     """Save the server Trello API data to a JSON file."""
     with open(SERVER_DATA_FILE, "w") as f:
         json.dump(server_data, f, indent=4)
+        @bot.command(help="Assign your Trello member ID to your Discord account.")
+        
+async def assign_trello_id(ctx, trello_id: str):
+    """Assign a Trello member ID to the Discord user so the bot knows who to notify."""
+    server_id = str(ctx.guild.id)
+    user_id = str(ctx.author.id)
+
+    # Ensure the server exists in data storage
+    if server_id not in server_data:
+        server_data[server_id] = {}
+
+    # Ensure the user has a profile in the server data
+    if "users" not in server_data[server_id]:
+        server_data[server_id]["users"] = {}
+
+    # Store Trello ID
+    server_data[server_id]["users"][user_id] = server_data[server_id]["users"].get(user_id, {})
+    server_data[server_id]["users"][user_id]["trello_id"] = trello_id
+    save_server_data()
+
+    await ctx.send(f"✅ Trello ID `{trello_id}` has been assigned to {ctx.author.mention}.")
+
+@bot.command(help="Set the channels where you want to receive notifications.")
+async def set_channels(ctx, *channel_names):
+    """Set the preferred notification channels for Trello updates."""
+    server_id = str(ctx.guild.id)
+    user_id = str(ctx.author.id)
+
+    # Ensure the server exists in data storage
+    if server_id not in server_data:
+        server_data[server_id] = {}
+
+    # Ensure the user has a profile in the server data
+    if "users" not in server_data[server_id]:
+        server_data[server_id]["users"] = {}
+
+    # Store preferred channels
+    server_data[server_id]["users"][user_id] = server_data[server_id]["users"].get(user_id, {})
+    server_data[server_id]["users"][user_id]["channels"] = list(channel_names)
+    save_server_data()
+
+    await ctx.send(f"✅ Notifications will be sent to: {', '.join(channel_names)}.")
 
 def get_trello_client(server_id):
     """Initialize a Trello client for a server."""
@@ -113,7 +155,7 @@ async def pingAll(ctx):
 
     for card in cards:
         card_id = card.id
-        assigned_members = card.member_ids  # Ensure you're getting the correct member IDs
+        assigned_members = card.member_ids
         new_checklists = {}
 
         # Build current card state
@@ -153,7 +195,6 @@ async def pingAll(ctx):
                                 changes.append(f"✅ **Task completed:** {item_name}")
                             elif state == "incomplete":
                                 changes.append(f"🔄 **Task in progress:** {item_name}")
-                    # Check for removed tasks
                     for old_item in old_items.keys():
                         if old_item not in items:
                             changes.append(f"❌ **Task removed:** {old_item}")
@@ -179,7 +220,7 @@ async def pingAll(ctx):
     # Send notifications per user in their preferred channels
     for card in new_cards:
         for trello_member_id in card.member_ids:
-            for uid, info in server_data.items():
+            for uid, info in server_data[server_id].get("users", {}).items():
                 if info.get('trello_id') == trello_member_id:
                     discord_user = await bot.fetch_user(uid)
                     if discord_user:
@@ -192,7 +233,7 @@ async def pingAll(ctx):
 
     for card, changes in updated_cards:
         for trello_member_id in card.member_ids:
-            for uid, info in server_data.items():
+            for uid, info in server_data[server_id].get("users", {}).items():
                 if info.get('trello_id') == trello_member_id:
                     discord_user = await bot.fetch_user(uid)
                     if discord_user:
