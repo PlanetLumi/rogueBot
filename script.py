@@ -77,6 +77,7 @@ def get_trello_client(server_id):
 ### ✅ COMMAND: Set Trello Credentials (Admins Only)
 @bot.command(help="Set Trello API key, token, and board ID for this server. (Admin Only)")
 @commands.has_permissions(administrator=True)
+
 async def set_trello(ctx, api_key: str, token: str, board_id: str):
     """Set Trello API key, token, and board ID for this Discord server."""
     server_id = str(ctx.guild.id)
@@ -115,8 +116,7 @@ async def list_board_members(ctx):
     embed = discord.Embed(title=f"Members of Board: {board.name}", color=discord.Color.blue())
     for member in members:
         embed.add_field(name=member.username, value=f"Full Name: {member.full_name}\nTrello ID: `{member.id}`", inline=False)
-    
-    await ctx.send(embed=embed)
+        await ctx.send(embed=embed)
 
 @bot.command(help="Notify users of new Trello tasks and updates.")
 async def pingAll(ctx):
